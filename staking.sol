@@ -657,7 +657,7 @@ contract SINStaking is Ownable {
     }
 
     mapping( address => Lockup) public lockupInfo;
-
+    uint internal month = 2629746;
 
     event LogStake(address indexed recipient, uint256 amount);
     event LogClaim(address indexed recipient, uint256 amount);
@@ -717,7 +717,7 @@ contract SINStaking is Ownable {
         });
         
         Lockup memory lock = lockupInfo[ _recipient ];
-        require(lock.multiplier == 0, "Account is already locked");
+        require(lock.multiplier == 0 || _lockup == LOCKUPS.NONE, "Account is already locked");
         
         uint256 amountToTransfer = _amount;
 
@@ -728,7 +728,7 @@ contract SINStaking is Ownable {
                 gonsAccount: IsSIN( sSIN ).gonsForBalance( _amount ),
                 initialDeposit: _amount,
                 multiplier: 125,
-                lockTimestamp: block.timestamp + 2629746
+                lockTimestamp: block.timestamp + month
             });
             amountToTransfer = _amount.mul(125)/100;
         }
@@ -739,7 +739,7 @@ contract SINStaking is Ownable {
                 gonsAccount: IsSIN( sSIN ).gonsForBalance( _amount ),
                 initialDeposit: _amount,
                 multiplier: 150,
-                lockTimestamp: block.timestamp + 2629746*3
+                lockTimestamp: block.timestamp + month*3
             });
 
             amountToTransfer = _amount.mul(150).div(100);
@@ -751,7 +751,7 @@ contract SINStaking is Ownable {
                 gonsAccount: IsSIN( sSIN ).gonsForBalance( _amount ),
                 initialDeposit: _amount,
                 multiplier: 200,
-                lockTimestamp: block.timestamp + 2629746*6
+                lockTimestamp: block.timestamp + month*6
             });
             amountToTransfer = _amount*2;
         }
@@ -805,7 +805,7 @@ contract SINStaking is Ownable {
             rebase();
         }
         Lockup memory lock = lockupInfo[ msg.sender ];
-        require(sSIN.balanceOf(msg.sender) - _amount >= sSIN.balanceForGons( lock.gonsAccount ), "Not enough sSIN");
+        require(sSIN.balanceOf(msg.sender) - _amount >= sSIN.balanceForGons( lock.gonsAccount ), "Not enough sSIN for lockup");
         sSIN.safeTransferFrom( msg.sender, address(this), _amount );
         SIN.safeTransfer( msg.sender, _amount );
         emit LogUnstake(msg.sender, _amount);
