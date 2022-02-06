@@ -1174,6 +1174,15 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
     bool public tradingActive = false;
     bool public swapEnabled = false;
     bool private swapping;
+    bool public limitsInEffect = true;
+    
+    // exlcude from fees and max transaction amount
+    mapping (address => bool) private _isExcludedFromFees;
+    mapping (address => bool) public _isExcludedMaxTransactionAmount;
+    uint256 public maxTransactionAmount;
+    uint256 public maxWallet;
+    uint256 public initialSupply;
+
 
     uint256 public buyTotalFees;
     uint256 public buyMarketingFee;
@@ -1196,9 +1205,6 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
     // could be subject to a maximum transfer amount
     mapping (address => bool) public automatedMarketMakerPairs;
 
-
-    mapping (address => bool) private _isExcludedFromFees;
-
     event UpdateUniswapV2Router(address indexed newAddress, address indexed oldAddress);
 
     event ExcludeFromFees(address indexed account, bool isExcluded);
@@ -1213,17 +1219,18 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
         uint256 tokensIntoLiquidity
     );
 
-    constructor(address _authority, address _marketingWallet, address _buybackWallet) 
+    constructor(address _authority, address _marketingWallet, address _buybackWallet, uint256 _initialSupply)
     ERC20("Sins", "SIN", 9) 
     ERC20Permit("Sins") 
     SinsAccessControlled(ISinsAuthority(_authority)) {
 
-        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x10ED43C718714eb63d5aA57B78B54704E256024E);
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
         uniswapV2Router = _uniswapV2Router;
         
         uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
         _setAutomatedMarketMakerPair(address(uniswapV2Pair), true);
         
+        initialSupply = _initialSupply;
         uint256 _buyMarketingFee = 2;
         uint256 _buyLiquidityFee = 3;
         uint256 _buyBurnFee = 1;
@@ -1233,6 +1240,10 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
         uint256 _sellLiquidityFee = 3;
         uint256 _sellBurnFee = 1;
         uint256 _sellBuybackFee = 0;
+
+        maxTransactionAmount = _initialSupply * 5 / 1000; // 0.5% maxTransactionAmountTxn
+        maxWallet = _initialSupply * 10 / 1000; // 1% maxWallet
+        _mint(authority.governor(), initialSupply);
         
     
         buyMarketingFee = _buyMarketingFee;
@@ -1263,6 +1274,27 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
 
   	}
 
+    // remove limits after token is stable
+    function removeLimits() external onlyGovernor returns (bool){
+        limitsInEffect = false;
+        return true;
+    }
+    
+    
+    function updateMaxTxnAmount(uint256 newNum) external onlyGovernor {
+        require(newNum >= (totalSupply() * 1 / 1000)/1e9, "Cannot set maxTransactionAmount lower than 0.1%");
+        maxTransactionAmount = newNum * (10**9);
+    }
+
+    function updateMaxWalletAmount(uint256 newNum) external onlyGovernor {
+        require(newNum >= (totalSupply() * 5 / 1000)/1e9, "Cannot set maxWallet lower than 0.5%");
+        maxWallet = newNum * (10**9);
+    }
+    
+    function excludeFromMaxTransaction(address updAds, bool isEx) public onlyGovernor {
+        _isExcludedMaxTransactionAmount[updAds] = isEx;
+    }
+    
 
     // once enabled, can never be turned off
     function enableTrading() external onlyGovernor {
@@ -1357,10 +1389,35 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
             return;
         }
 
-         if(!tradingActive){
+        if(limitsInEffect){
+            if (
+                from != authority.governor() &&
+                to != authority.governor() &&
+                to != address(0) &&
+                to != address(0xdead) &&
+                !swapping
+            ){
+                if(!tradingActive){
                     require(_isExcludedFromFees[from] || _isExcludedFromFees[to], "Trading is not active.");
+                }
+                 
+                //when buy
+                if (automatedMarketMakerPairs[from] && !_isExcludedMaxTransactionAmount[to]) {
+                        require(amount <= maxTransactionAmount, "Buy transfer amount exceeds the maxTransactionAmount.");
+                        require(amount + balanceOf(to) <= maxWallet, "Max wallet exceeded");
+                }
+                
+                //when sell
+                else if (automatedMarketMakerPairs[to] && !_isExcludedMaxTransactionAmount[from]) {
+                        require(amount <= maxTransactionAmount, "Sell transfer amount exceeds the maxTransactionAmount.");
+                }
+                else if(!_isExcludedMaxTransactionAmount[to]){
+                    require(amount + balanceOf(to) <= maxWallet, "Max wallet exceeded");
+                }
+            }
         }
-		
+
+
         if( 
             swapEnabled &&
             !swapping &&
