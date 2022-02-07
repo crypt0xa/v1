@@ -839,6 +839,10 @@ interface IUniswapV2Router02 is IUniswapV2Router01 {
 }
 
 
+interface ITaxDistributor {
+  function distribute(address urv2, address dai, address marketingWallet, uint256 daiForBuyback, address buybackWallet, uint256 liquidityTokens, uint256 daiForLiquidity, address liquidityTo) external;
+}
+
 pragma solidity >=0.7.5;
 
 
@@ -1174,15 +1178,6 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
     bool public tradingActive = false;
     bool public swapEnabled = false;
     bool private swapping;
-    bool public limitsInEffect = true;
-    
-    // exlcude from fees and max transaction amount
-    mapping (address => bool) private _isExcludedFromFees;
-    mapping (address => bool) public _isExcludedMaxTransactionAmount;
-    uint256 public maxTransactionAmount;
-    uint256 public maxWallet;
-    uint256 public initialSupply;
-
 
     uint256 public buyTotalFees;
     uint256 public buyMarketingFee;
@@ -1195,15 +1190,28 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
     uint256 public sellLiquidityFee;
     uint256 public sellBurnFee;
     uint256 public sellBuybackFee;
-
+    address public taxDistributor;
     uint256 public tokensForMarketing;
     uint256 public tokensForLiquidity;
     uint256 public tokensForBurn;
     uint256 public tokensForBuyback;
 
+    bool public limitsInEffect = true;
+    // Anti-bot and anti-whale mappings and variables
+    mapping(address => uint256) private _holderLastTransferTimestamp; // to hold last Transfers temporarily during launch
+    bool public transferDelayEnabled = true;
+
+     // exlcude from fees and max transaction amount
+    mapping (address => bool) private _isExcludedFromFees;
+    mapping (address => bool) public _isExcludedMaxTransactionAmount;
+    uint256 public maxTransactionAmount;
+    uint256 public maxWallet;
+    uint256 public initialSupply;
+    address public dai;
     // store addresses that a automatic market maker pairs. Any transfer *to* these addresses
     // could be subject to a maximum transfer amount
     mapping (address => bool) public automatedMarketMakerPairs;
+
 
     event UpdateUniswapV2Router(address indexed newAddress, address indexed oldAddress);
 
@@ -1219,31 +1227,31 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
         uint256 tokensIntoLiquidity
     );
 
-    constructor(address _authority, address _marketingWallet, address _buybackWallet, uint256 _initialSupply)
+    constructor(address _authority, address _marketingWallet, address _buybackWallet, address _dai) 
     ERC20("Sins", "SIN", 9) 
     ERC20Permit("Sins") 
     SinsAccessControlled(ISinsAuthority(_authority)) {
 
         IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
         uniswapV2Router = _uniswapV2Router;
-        
-        uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
+        dai = _dai;
+        uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _dai);
         _setAutomatedMarketMakerPair(address(uniswapV2Pair), true);
+
+        initialSupply = 50000*1e9;
+        maxTransactionAmount = initialSupply * 5 / 1000; // 0.5% maxTransactionAmountTxn
+        maxWallet = initialSupply * 10 / 1000; // 1% maxWallet
+        _mint(authority.governor(), initialSupply);
         
-        initialSupply = _initialSupply;
         uint256 _buyMarketingFee = 2;
         uint256 _buyLiquidityFee = 3;
         uint256 _buyBurnFee = 1;
         uint256 _buyBuybackFee = 0;
 
-        uint256 _sellMarketingFee = 4;
+        uint256 _sellMarketingFee = 9;
         uint256 _sellLiquidityFee = 3;
         uint256 _sellBurnFee = 1;
-        uint256 _sellBuybackFee = 0;
-
-        maxTransactionAmount = _initialSupply * 5 / 1000; // 0.5% maxTransactionAmountTxn
-        maxWallet = _initialSupply * 10 / 1000; // 1% maxWallet
-        _mint(authority.governor(), initialSupply);
+        uint256 _sellBuybackFee = 2;
         
     
         buyMarketingFee = _buyMarketingFee;
@@ -1251,14 +1259,12 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
         buyBurnFee = _buyBurnFee;
         buyBuybackFee = _buyBuybackFee;
         buyTotalFees = buyMarketingFee + buyLiquidityFee + buyBurnFee + buyBuybackFee;
-        require(buyTotalFees < 15, "Total fees must be less than 15%");
 
         sellMarketingFee = _sellMarketingFee;
         sellLiquidityFee = _sellLiquidityFee;
         sellBurnFee = _sellBurnFee;
         sellBuybackFee = _sellBuybackFee;
         sellTotalFees = sellMarketingFee + sellLiquidityFee + sellBurnFee + sellBuybackFee;
-        require(sellTotalFees < 15, "Total fees must be less than 15%");
         
         marketingWallet = address(_marketingWallet);
         buybackWallet = address(_buybackWallet);
@@ -1277,10 +1283,20 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
     // remove limits after token is stable
     function removeLimits() external onlyGovernor returns (bool){
         limitsInEffect = false;
+        sellMarketingFee = 4;
+        sellLiquidityFee = 3;
+        sellBurnFee = 1;
+        sellBuybackFee = 0;
+        sellTotalFees = sellMarketingFee + sellLiquidityFee + sellBurnFee + sellBuybackFee;
         return true;
     }
-    
-    
+
+
+    function updateTaxDistributor(address _taxDistributor) external onlyGovernor {
+        taxDistributor = _taxDistributor;
+    }
+
+
     function updateMaxTxnAmount(uint256 newNum) external onlyGovernor {
         require(newNum >= (totalSupply() * 1 / 1000)/1e9, "Cannot set maxTransactionAmount lower than 0.1%");
         maxTransactionAmount = newNum * (10**9);
@@ -1290,11 +1306,18 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
         require(newNum >= (totalSupply() * 5 / 1000)/1e9, "Cannot set maxWallet lower than 0.5%");
         maxWallet = newNum * (10**9);
     }
-    
+
     function excludeFromMaxTransaction(address updAds, bool isEx) public onlyGovernor {
         _isExcludedMaxTransactionAmount[updAds] = isEx;
     }
     
+    // disable Transfer delay - cannot be reenabled
+    function disableTransferDelay() external onlyGovernor returns (bool){
+        transferDelayEnabled = false;
+        return true;
+    }
+
+
 
     // once enabled, can never be turned off
     function enableTrading() external onlyGovernor {
@@ -1400,13 +1423,22 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
                 if(!tradingActive){
                     require(_isExcludedFromFees[from] || _isExcludedFromFees[to], "Trading is not active.");
                 }
-                 
+
+                // at launch if the transfer delay is enabled, ensure the block timestamps for purchasers is set -- during launch.  
+                if (transferDelayEnabled){
+                    if (to != authority.governor() && to != address(uniswapV2Router) && to != address(uniswapV2Pair)){
+                        require(_holderLastTransferTimestamp[tx.origin] < block.number, "_transfer:: Transfer Delay enabled.  Only one purchase per block allowed.");
+                        _holderLastTransferTimestamp[tx.origin] = block.number;
+                    }
+                }
+
+
                 //when buy
                 if (automatedMarketMakerPairs[from] && !_isExcludedMaxTransactionAmount[to]) {
                         require(amount <= maxTransactionAmount, "Buy transfer amount exceeds the maxTransactionAmount.");
                         require(amount + balanceOf(to) <= maxWallet, "Max wallet exceeded");
                 }
-                
+
                 //when sell
                 else if (automatedMarketMakerPairs[to] && !_isExcludedMaxTransactionAmount[from]) {
                         require(amount <= maxTransactionAmount, "Sell transfer amount exceeds the maxTransactionAmount.");
@@ -1416,8 +1448,7 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
                 }
             }
         }
-
-
+		
         if( 
             swapEnabled &&
             !swapping &&
@@ -1475,47 +1506,29 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
     }
 
 
-    function swapTokensForEth(uint256 tokenAmount) private {
+    function swapTokensForDai(uint256 tokenAmount) public {
 
         // generate the uniswap pair path of token -> weth
         address[] memory path = new address[](2);
         path[0] = address(this);
-        path[1] = uniswapV2Router.WETH();
+        path[1] = dai;
 
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
         // make the swap
-        uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uniswapV2Router.swapExactTokensForTokensSupportingFeeOnTransferTokens(
             tokenAmount,
             0, // accept any amount of ETH
             path,
-            address(this),
+            taxDistributor,
             block.timestamp
         );
         
     }
 
-
-    function addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
-        // approve token transfer to cover all possible scenarios
-        _approve(address(this), address(uniswapV2Router), tokenAmount);
-
-        // add the liquidity
-        uniswapV2Router.addLiquidityETH{value: ethAmount}(
-            address(this),
-            tokenAmount,
-            0, // slippage is unavoidable
-            0, // slippage is unavoidable
-            authority.governor(),
-            block.timestamp
-        );
-    }
-
-
-    function swapBack() private {
+    function swapBack() public {
         uint256 contractBalance = balanceOf(address(this));
         uint256 totalTokensToSwap = tokensForLiquidity + tokensForMarketing + tokensForBuyback;
-        bool success;
         
         if(contractBalance == 0 || totalTokensToSwap == 0) {return;}
         
@@ -1524,35 +1537,28 @@ contract SinsERC20Token is ERC20Permit, ISIN, SinsAccessControlled {
         }
         // Halve the amount of liquidity tokens
         uint256 liquidityTokens = contractBalance * tokensForLiquidity / totalTokensToSwap / 2;
-        uint256 amountToSwapForETH = contractBalance.sub(liquidityTokens);
+        uint256 amountToSwapForDai = contractBalance.sub(liquidityTokens);
         
-        uint256 initialETHBalance = address(this).balance;
+        uint256 initialDaiBalance = IERC20(dai).balanceOf(taxDistributor);
 
-        swapTokensForEth(amountToSwapForETH); 
+        swapTokensForDai(amountToSwapForDai); 
+        
+        uint256 daiBalance = IERC20(dai).balanceOf(taxDistributor).sub(initialDaiBalance);
         
 
-        uint256 ethBalance = address(this).balance.sub(initialETHBalance);
+        uint256 daiForMarketing = daiBalance.mul(tokensForMarketing).div(totalTokensToSwap);
+        uint256 daiForBuyback = daiBalance.mul(tokensForBuyback).div(totalTokensToSwap);
         
+        uint256 daiForLiquidity = daiBalance - daiForMarketing - daiForBuyback;
 
-        uint256 ethForMarketing = ethBalance.mul(tokensForMarketing).div(totalTokensToSwap);
-        uint256 ethForBuyback = ethBalance.mul(tokensForBuyback).div(totalTokensToSwap);
-        
-        uint256 ethForLiquidity = ethBalance - ethForMarketing - ethForBuyback;
+        super._transfer(address(this), taxDistributor, liquidityTokens);
 
+        ITaxDistributor(taxDistributor).distribute(address(uniswapV2Router), dai, marketingWallet, daiForBuyback, buybackWallet, liquidityTokens, daiForLiquidity, authority.governor());
         
         tokensForLiquidity = 0;
         tokensForMarketing = 0;
         tokensForBuyback = 0;
-        
-        (success,) = address(buybackWallet).call{value: ethForBuyback}("");
-        
-        if(liquidityTokens > 0 && ethForLiquidity > 0){
-            addLiquidity(liquidityTokens, ethForLiquidity);
-            emit SwapAndLiquify(amountToSwapForETH, ethForLiquidity, tokensForLiquidity);
-        }
-        
-        
-        (success,) = address(marketingWallet).call{value: address(this).balance}("");
+
     }
 
 
