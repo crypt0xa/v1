@@ -334,6 +334,7 @@ contract SINBondingCalculator is IBondingCalculator {
             return reserve.div(reserve0);
         } else {
             require(IUniswapV2Pair( _pair ).token1() == address(SIN), "not a SIN lp pair");
+            reserve = reserve0;
             return reserve.div(reserve1);
         }
     }
